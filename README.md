@@ -1,8 +1,12 @@
 # APV GI Hijack — Unity 6 / URP
 
+![preview](preview.png)
+
 A tiny proof-of-concept that injects **realtime** data into Unity's
 Adaptive Probe Volume system — originally built only for *baked*
-light probes.
+light probes. The wall above is lit purely by ambient SH coming out
+of our compute shader: rainbow rings radiating from the camera plus
+hemispherical sky/ground bias, sampled by stock URP/Lit.
 
 ## What it does
 
