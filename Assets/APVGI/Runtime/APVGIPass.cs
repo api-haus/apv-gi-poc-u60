@@ -105,6 +105,12 @@ namespace APVGI
     static readonly int s_NoiseScale = Shader.PropertyToID("_NoiseScale");
     static readonly int s_NoiseDrift = Shader.PropertyToID("_NoiseDrift");
     static readonly int s_NoiseAmount = Shader.PropertyToID("_NoiseAmount");
+    static readonly int s_SkyColour = Shader.PropertyToID("_SkyColour");
+    static readonly int s_GroundColour = Shader.PropertyToID("_GroundColour");
+    static readonly int s_HemiAmount = Shader.PropertyToID("_HemiAmount");
+    static readonly int s_SwirlColour = Shader.PropertyToID("_SwirlColour");
+    static readonly int s_SwirlAxis = Shader.PropertyToID("_SwirlAxis");
+    static readonly int s_SwirlAmount = Shader.PropertyToID("_SwirlAmount");
 
     static Texture3D s_WhiteVolume;
 
@@ -396,6 +402,12 @@ namespace APVGI
       public float NoiseScale;
       public float NoiseDrift;
       public float NoiseAmount;
+      public float4 SkyColour;
+      public float4 GroundColour;
+      public float HemiAmount;
+      public float4 SwirlColour;
+      public float3 SwirlAxisSpun;
+      public float SwirlAmount;
 
       public RenderTexture PoolL0L1Rx;
       public RenderTexture PoolL1G_Ry;
@@ -432,6 +444,25 @@ namespace APVGI
       data.NoiseScale = _settings.noiseScale;
       data.NoiseDrift = _settings.noiseDrift;
       data.NoiseAmount = _settings.noiseAmount;
+
+      // Hemispherical: pass linear-light colours; the encoder will derive
+      // L0 = (sky+ground)/2 and L1.y = (sky-ground)/2 per channel.
+      data.SkyColour = (Vector4)_settings.skyColour.linear;
+      data.GroundColour = (Vector4)_settings.groundColour.linear;
+      data.HemiAmount = _settings.hemisphericalAmount;
+
+      // Swirl: normalize the user axis, then spin it around world-up Y so
+      // the directional gradient sweeps through every surface — exercises
+      // all three L1 axes over time.
+      data.SwirlColour = (Vector4)_settings.swirlColour.linear;
+      var ax = (float3)(Vector3)_settings.swirlAxis;
+      var axLen = length(ax);
+      ax = axLen > 1e-5f ? ax / axLen : float3(1f, 0f, 0f);
+      var spin = data.Time * _settings.swirlSpinSpeed;
+      var c = cos(spin);
+      var s = sin(spin);
+      data.SwirlAxisSpun = float3(c * ax.x + s * ax.z, ax.y, -s * ax.x + c * ax.z);
+      data.SwirlAmount = _settings.swirlAmount;
 
       data.PoolL0L1Rx = _poolL0L1Rx;
       data.PoolL1G_Ry = _poolL1G_Ry;
@@ -491,6 +522,13 @@ namespace APVGI
       cmd.SetComputeFloatParam(d.WriteCS, s_NoiseScale, d.NoiseScale);
       cmd.SetComputeFloatParam(d.WriteCS, s_NoiseDrift, d.NoiseDrift);
       cmd.SetComputeFloatParam(d.WriteCS, s_NoiseAmount, d.NoiseAmount);
+
+      cmd.SetComputeVectorParam(d.WriteCS, s_SkyColour, d.SkyColour);
+      cmd.SetComputeVectorParam(d.WriteCS, s_GroundColour, d.GroundColour);
+      cmd.SetComputeFloatParam(d.WriteCS, s_HemiAmount, d.HemiAmount);
+      cmd.SetComputeVectorParam(d.WriteCS, s_SwirlColour, d.SwirlColour);
+      cmd.SetComputeVectorParam(d.WriteCS, s_SwirlAxis, float4(d.SwirlAxisSpun, 0f));
+      cmd.SetComputeFloatParam(d.WriteCS, s_SwirlAmount, d.SwirlAmount);
 
       var groups = (poolDim + 3) / 4;
       cmd.DispatchCompute(d.WriteCS, d.WriteKernel, groups, groups, groups);

@@ -37,6 +37,16 @@ float _NoiseScale;   // 1 / spatial wavelength (m^-1)
 float _NoiseDrift;   // metres per second of XYZ scroll
 float _NoiseAmount;  // 0 = pure rainbow, 1 = full noise modulation
 
+// L1 — hemispherical sky / ground bias (drives the Y axis only).
+float4 _SkyColour;
+float4 _GroundColour;
+float _HemiAmount;
+
+// L1 — directional swirl (drives all three axes; CPU pre-spins the axis).
+float4 _SwirlColour;
+float4 _SwirlAxis;   // .xyz pre-spun, .w unused
+float _SwirlAmount;
+
 // Hash + smooth value noise. Cheap, GPU-friendly, looks Perlin-y
 // enough for visualisation. (Real Perlin needs gradients — we just
 // want soft drifting blobs so people can see "yes data flows through".)
@@ -77,6 +87,22 @@ float FbmNoise(float3 p)
   return n / 1.5;
 }
 
+// HDRP-compatible APV L1 encoding. l1 / (l0 * 4) + 0.5, clamped to 0.5
+// when l0 underflows (the half-precision pool can't roundtrip otherwise).
+// See com.unity.render-pipelines.core/.../DecodeSH.hlsl — APV_L1_ENCODING_SCALE = 2.
+float EncodeL1Scalar(float l0, float l1)
+{
+  return l0 < 1e-4 ? 0.5 : l1 / (l0 * 4.0) + 0.5;
+}
+
+float3 EncodeL1Vector(float l0, float3 l1)
+{
+  return float3(
+    EncodeL1Scalar(l0, l1.x),
+    EncodeL1Scalar(l0, l1.y),
+    EncodeL1Scalar(l0, l1.z));
+}
+
 // Saturated HSV→RGB at value=1.
 float3 HueToRgb(float hue)
 {
@@ -111,12 +137,21 @@ void CSWriteRandomColors(uint3 id : SV_DispatchThreadID)
   uint lbz = (packedLocal >> 10) & 0x1F;
   uint bpa = (packedLocal >> 15) & 0x1F;
 
-  // In-brick probe offset, centred on quarter-cell positions —
-  // matches the centres URP's bilinear sampler reads at.
-  float3 probeLocal = (float3(
+  // In-brick probe offset — VERTEX layout (probes at 0, 1/3, 2/3, 1
+  // of the brick, sharing faces with neighbours). URP samples with
+  //   uvw = pool_idx + 0.5 + 3.0 * frac(posWS / brickSize)
+  // so the four texels' centres correspond to brick-space positions
+  // 0, 1/3, 2/3, 1. Writing probes at quarter-cell *centres* instead
+  // puts a 0.25 * brickSize world-position gap between A.probe[3]
+  // and B.probe[0], which URP's bilinear-within-a-brick can't bridge
+  // → visible seams at every brick boundary. With vertex layout,
+  // A.probe[3] and B.probe[0] resolve to the same world point and
+  // therefore (since colour is a function of world position) carry
+  // identical SH coefficients — sampling is continuous.
+  float3 probeLocal = float3(
     float(id.x % (uint)_BrickProbeCount),
     float(id.y % (uint)_BrickProbeCount),
-    float(id.z % (uint)_BrickProbeCount)) + 0.5) / float(_BrickProbeCount);
+    float(id.z % (uint)_BrickProbeCount)) / float(_BrickProbeCount - 1);
 
   float invBpa = 1.0 / max(float(bpa), 1.0);
   float3 entryUnit = float3(float(ex), float(ey), float(ez));
@@ -133,11 +168,46 @@ void CSWriteRandomColors(uint3 id : SV_DispatchThreadID)
   float noise = FbmNoise(noisePos);                       // [0,1]
   float modulator = lerp(1.0, noise * 2.0, _NoiseAmount); // ~1 at amount=0
 
-  float3 col = rainbow * modulator * _Intensity;
+  float3 rainbowL0 = rainbow * modulator * _Intensity;
 
-  // ---- Pure ambient: L0 = colour, L1 = 0 (encoded as 0.5). ----
-  _OutL0_L1Rx[id] = half4(col.r, col.g, col.b, 0.5);
-  _OutL1G_L1Ry[id] = float4(0.5, 0.5, 0.5, 0.5);
-  _OutL1B_L1Rz[id] = float4(0.5, 0.5, 0.5, 0.5);
+  // ---- L1 contributions. -----------------------------------------
+  //
+  // Hemispherical: irradiance(N) = L0 + dot(N.yzx, L1_ch) — picking
+  //   L0_h = (sky+ground)/2 and L1_h.y = (sky-ground)/2 reproduces
+  //   `sky` when N=up and `ground` when N=down. Only the Y axis is
+  //   touched, so this is the single-axis sanity probe.
+  //
+  // Swirl: per-channel amplitude * (axisY, axisZ, axisX) — exercises
+  //   all three L1 axes coherently. CPU rotates the axis around
+  //   world-up every frame, so surfaces visibly sweep through the
+  //   gradient and you can confirm no axis is silently dead.
+  // ----------------------------------------------------------------
+  float3 hemiL0 = (_SkyColour.rgb + _GroundColour.rgb) * 0.5 * _HemiAmount;
+  float3 hemiL1y = (_SkyColour.rgb - _GroundColour.rgb) * 0.5 * _HemiAmount;
+
+  float3 swirlAmp = _SwirlColour.rgb * _SwirlAmount;
+  // L1 in (Y, Z, X) order, per RGB channel.
+  float3 L1y = hemiL1y + swirlAmp * _SwirlAxis.y;
+  float3 L1z = swirlAmp * _SwirlAxis.z;
+  float3 L1x = swirlAmp * _SwirlAxis.x;
+
+  float3 L0 = rainbowL0 + hemiL0;
+  // Avoid encode/decode div-by-zero — APV's decoder multiplies the
+  // (encoded-0.5) term by L0, so a tiny L0 silently zeroes L1.
+  L0 = max(L0, 1e-4);
+
+  float3 L1_R = float3(L1y.r, L1z.r, L1x.r);
+  float3 L1_G = float3(L1y.g, L1z.g, L1x.g);
+  float3 L1_B = float3(L1y.b, L1z.b, L1x.b);
+
+  float3 encR = EncodeL1Vector(L0.r, L1_R);
+  float3 encG = EncodeL1Vector(L0.g, L1_G);
+  float3 encB = EncodeL1Vector(L0.b, L1_B);
+
+  // Pool layout — alpha channels carry the R-channel L1 vector,
+  // RGB carries G and B respectively. Matches APV's SampleAPV().
+  _OutL0_L1Rx[id]  = half4(L0.r, L0.g, L0.b, encR.x);
+  _OutL1G_L1Ry[id] = float4(encG.x, encG.y, encG.z, encR.y);
+  _OutL1B_L1Rz[id] = float4(encB.x, encB.y, encB.z, encR.z);
   _OutValidity[id] = 1.0;
 }

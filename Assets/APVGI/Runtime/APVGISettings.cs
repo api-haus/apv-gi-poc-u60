@@ -46,6 +46,40 @@ namespace APVGI
     [Tooltip("0 = pure rainbow rings, 1 = full noise modulation.")]
     public float noiseAmount;
 
+    [Header("L1 — Hemispherical (sky / ground)")]
+    [ColorUsage(false, true)]
+    [Tooltip("Indirect tint when the surface normal points UP. Drives L1.y.")]
+    public Color skyColour;
+
+    [ColorUsage(false, true)]
+    [Tooltip("Indirect tint when the surface normal points DOWN. Drives L1.y.")]
+    public Color groundColour;
+
+    [Range(0f, 2f)]
+    [Tooltip(
+      "Amount of hemispherical bias. 0 = isotropic ambient,\n"
+        + "1 = full sky/ground split. Useful single-axis L1 probe."
+    )]
+    public float hemisphericalAmount;
+
+    [Header("L1 — Directional swirl (exercises all three axes)")]
+    [ColorUsage(false, true)]
+    [Tooltip("Per-channel amplitude of the directional gradient.")]
+    public Color swirlColour;
+
+    [Tooltip(
+      "Unit-ish vector — the direction along which `swirlColour` is brightest.\n"
+        + "Auto-spins around world-up at `swirlSpinSpeed` rad/s."
+    )]
+    public Vector3 swirlAxis;
+
+    [Range(0f, 2f)]
+    [Tooltip("0 = no directional gradient, 1 = full L1 amplitude per channel.")]
+    public float swirlAmount;
+
+    [Tooltip("Spin rate of `swirlAxis` around world-up Y, in radians per second.")]
+    public float swirlSpinSpeed;
+
     public static APVGISettings Default => new()
     {
       probeDensity = 1f,
@@ -56,6 +90,16 @@ namespace APVGI
       noiseScale = 0.08f,      // ~12 m blobs
       noiseDrift = 0.5f,
       noiseAmount = 0.6f,
+      // Subtle hemispherical bias on by default — proves L1.y survives
+      // the moment you spin a sphere in the scene.
+      skyColour = new Color(0.4f, 0.6f, 1.0f, 1f),
+      groundColour = new Color(0.4f, 0.3f, 0.15f, 1f),
+      hemisphericalAmount = 0.5f,
+      // Swirl off by default; flip swirlAmount > 0 to exercise L1.x / L1.z.
+      swirlColour = new Color(1f, 0.4f, 0.2f, 1f),
+      swirlAxis = new Vector3(1f, 0f, 0f),
+      swirlAmount = 0f,
+      swirlSpinSpeed = 1f,
     };
   }
 }

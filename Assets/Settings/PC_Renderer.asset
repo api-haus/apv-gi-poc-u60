@@ -18,10 +18,17 @@ MonoBehaviour:
     coverageDistance: 400
     hueScale: 0.06
     hueSpeed: 0.25
-    intensity: 1
-    noiseScale: 0.1
+    intensity: 0.58
+    noiseScale: 0.25
     noiseDrift: 1
     noiseAmount: 1
+    skyColour: {r: 0.4, g: 0.6, b: 1, a: 1}
+    groundColour: {r: 0.4, g: 0.3, b: 0.15, a: 1}
+    hemisphericalAmount: 1
+    swirlColour: {r: 1, g: 0.4, b: 0.2, a: 1}
+    swirlAxis: {x: 1, y: 0, z: 0}
+    swirlAmount: 1
+    swirlSpinSpeed: 1
   randomColoursCS: {fileID: 7200000, guid: 9e7a5306c9a728ff0831a4626d441d8a, type: 3}
 --- !u!114 &11400000
 MonoBehaviour:
