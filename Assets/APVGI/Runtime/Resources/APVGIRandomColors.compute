@@ -1,0 +1,143 @@
+#pragma kernel CSWriteRandomColors
+
+#include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+
+// Pool textures — same layout APV samples from. Each brick is 4x4x4
+// probes packed sequentially into a 3D pool. We write a per-probe
+// L0 (ambient) and zero L1 (no directional component). L1 channels
+// encode to 0.5 in unorm because EncodeSH returns 0.5 for zero L1.
+RWTexture3D<half4> _OutL0_L1Rx;     // RGB=L0, A=encoded L1Rx
+RWTexture3D<float4> _OutL1G_L1Ry;   // RGB=encoded L1G, A=encoded L1Ry
+RWTexture3D<float4> _OutL1B_L1Rz;   // RGB=encoded L1B, A=encoded L1Rz
+RWTexture3D<float> _OutValidity;    // 1.0 = valid
+
+// Brick lookup tables — let us reconstruct each probe's world
+// position from its pool location, so the colour pattern can be
+// authored in world space (rainbow rings from the camera + sliding
+// Perlin noise) instead of pool-space hashing.
+StructuredBuffer<uint> _BrickEntryXYZ; // packed (ex|ey<<8|ez<<16) per brick
+StructuredBuffer<uint> _BrickLocal;    // packed (bx|by<<5|bz<<10|bpa<<15) per brick
+
+int3 _PoolDim;
+int _BrickProbeCount;
+int _EntriesPerAxis;
+
+float3 _GridMin;
+float _EntryDim;
+float3 _CameraPos;
+float _Time;
+
+// Rainbow rings from the camera.
+float _HueScale;     // cycles per metre along the radial axis
+float _HueSpeed;     // hue drift in cycles per second
+float _Intensity;    // overall L0 multiplier
+
+// Perlin / value noise modulation.
+float _NoiseScale;   // 1 / spatial wavelength (m^-1)
+float _NoiseDrift;   // metres per second of XYZ scroll
+float _NoiseAmount;  // 0 = pure rainbow, 1 = full noise modulation
+
+// Hash + smooth value noise. Cheap, GPU-friendly, looks Perlin-y
+// enough for visualisation. (Real Perlin needs gradients — we just
+// want soft drifting blobs so people can see "yes data flows through".)
+float Hash1(float3 p)
+{
+  p = frac(p * 0.1031);
+  p += dot(p, p.yzx + 33.33);
+  return frac((p.x + p.y) * p.z);
+}
+
+float ValueNoise(float3 p)
+{
+  float3 i = floor(p);
+  float3 f = frac(p);
+  float3 u = f * f * (3.0 - 2.0 * f); // smoothstep
+  float n000 = Hash1(i + float3(0, 0, 0));
+  float n100 = Hash1(i + float3(1, 0, 0));
+  float n010 = Hash1(i + float3(0, 1, 0));
+  float n110 = Hash1(i + float3(1, 1, 0));
+  float n001 = Hash1(i + float3(0, 0, 1));
+  float n101 = Hash1(i + float3(1, 0, 1));
+  float n011 = Hash1(i + float3(0, 1, 1));
+  float n111 = Hash1(i + float3(1, 1, 1));
+  float nx00 = lerp(n000, n100, u.x);
+  float nx10 = lerp(n010, n110, u.x);
+  float nx01 = lerp(n001, n101, u.x);
+  float nx11 = lerp(n011, n111, u.x);
+  float nxy0 = lerp(nx00, nx10, u.y);
+  float nxy1 = lerp(nx01, nx11, u.y);
+  return lerp(nxy0, nxy1, u.z);
+}
+
+// Two octaves of value noise — soft, drifting, visibly evolving.
+float FbmNoise(float3 p)
+{
+  float n = ValueNoise(p);
+  n += 0.5 * ValueNoise(p * 2.0 + 17.7);
+  return n / 1.5;
+}
+
+// Saturated HSV→RGB at value=1.
+float3 HueToRgb(float hue)
+{
+  float3 rgb = float3(
+    abs(hue * 6.0 - 3.0) - 1.0,
+    2.0 - abs(hue * 6.0 - 2.0),
+    2.0 - abs(hue * 6.0 - 4.0));
+  return saturate(rgb);
+}
+
+[numthreads(4, 4, 4)]
+void CSWriteRandomColors(uint3 id : SV_DispatchThreadID)
+{
+  if (any(id >= (uint3)_PoolDim))
+    return;
+
+  // ---- Reconstruct world position of this probe. ----
+  uint3 brick = id / (uint3)_BrickProbeCount;
+  int bricksPerPoolAxis = _PoolDim.x / _BrickProbeCount;
+  int brickFlat = brick.z * bricksPerPoolAxis * bricksPerPoolAxis
+    + brick.y * bricksPerPoolAxis
+    + brick.x;
+
+  uint packedEntry = _BrickEntryXYZ[brickFlat];
+  uint ex = packedEntry & 0xFF;
+  uint ey = (packedEntry >> 8) & 0xFF;
+  uint ez = (packedEntry >> 16) & 0xFF;
+
+  uint packedLocal = _BrickLocal[brickFlat];
+  uint lbx = packedLocal & 0x1F;
+  uint lby = (packedLocal >> 5) & 0x1F;
+  uint lbz = (packedLocal >> 10) & 0x1F;
+  uint bpa = (packedLocal >> 15) & 0x1F;
+
+  // In-brick probe offset, centred on quarter-cell positions —
+  // matches the centres URP's bilinear sampler reads at.
+  float3 probeLocal = (float3(
+    float(id.x % (uint)_BrickProbeCount),
+    float(id.y % (uint)_BrickProbeCount),
+    float(id.z % (uint)_BrickProbeCount)) + 0.5) / float(_BrickProbeCount);
+
+  float invBpa = 1.0 / max(float(bpa), 1.0);
+  float3 entryUnit = float3(float(ex), float(ey), float(ez));
+  float3 inEntry = (float3(float(lbx), float(lby), float(lbz)) + probeLocal) * invBpa;
+  float3 probeWorld = _GridMin + (entryUnit + inEntry) * _EntryDim;
+
+  // ---- Pattern: rainbow ring radiating from camera, modulated by
+  //      a sliding Perlin-style noise field. -----------------------
+  float radial = length(probeWorld - _CameraPos);
+  float hue = frac(radial * _HueScale - _Time * _HueSpeed);
+  float3 rainbow = HueToRgb(hue);
+
+  float3 noisePos = probeWorld * _NoiseScale + _Time * _NoiseDrift;
+  float noise = FbmNoise(noisePos);                       // [0,1]
+  float modulator = lerp(1.0, noise * 2.0, _NoiseAmount); // ~1 at amount=0
+
+  float3 col = rainbow * modulator * _Intensity;
+
+  // ---- Pure ambient: L0 = colour, L1 = 0 (encoded as 0.5). ----
+  _OutL0_L1Rx[id] = half4(col.r, col.g, col.b, 0.5);
+  _OutL1G_L1Ry[id] = float4(0.5, 0.5, 0.5, 0.5);
+  _OutL1B_L1Rz[id] = float4(0.5, 0.5, 0.5, 0.5);
+  _OutValidity[id] = 1.0;
+}
