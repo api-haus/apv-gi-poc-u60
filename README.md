@@ -49,6 +49,14 @@ reduction, and URP/Lit integration for free.
   `ProbeReferenceVolume.BindAPVRuntimeResources`. **It may not be
   100 % correct** — leak reduction, validity bias, and per-cascade
   `bricksPerAxis` transitions could have subtle bugs.
+- **Unity's Rendering Debugger (`Window → Analysis → Rendering
+  Debugger → Probe Volume`) doesn't see anything.** It reads from
+  the engine's CPU-side `ProbeReferenceVolume` representation —
+  which we deliberately bypass by writing straight to the shader
+  globals. URP/Lit samples our data fine; the debugger views,
+  brick gizmos, probe inspector, and validity overlays all stay
+  empty. Diagnose visually, or temporarily flip
+  `_DEBUG_RANDOM_COLORS`-style branches in the compute shader.
 - `APVGIPass` mixes buffer construction, compute dispatch, and
   shader-global plumbing in one file. It wants a refactor. PRs
   welcome.
