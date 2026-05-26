@@ -58,5 +58,4 @@ reduction, and URP/Lit integration for free.
   empty. Diagnose visually, or temporarily flip
   `_DEBUG_RANDOM_COLORS`-style branches in the compute shader.
 - `APVGIPass` mixes buffer construction, compute dispatch, and
-  shader-global plumbing in one file. It wants a refactor. PRs
-  welcome.
+  shader-global plumbing in one file. It wants a refactor. TODO:
